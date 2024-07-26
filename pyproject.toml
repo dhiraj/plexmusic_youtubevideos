@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "plexmusic-youtubevideos"
+version = "0.1.0"
+description = "Sync music playlists from your plex instance to youtube music videos"
+authors = ["Dhiraj Gupta"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+plexapi = "^4.15.15"
+google-auth = "^2.32.0"
+google-auth-oauthlib = "^1.2.1"
+google-auth-httplib2 = "^0.2.0"
+google-api-python-client = "^2.137.0"
+click = "^8.1.7"
+sqlalchemy = "^2.0.31"
+pytube = "^15.0.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
