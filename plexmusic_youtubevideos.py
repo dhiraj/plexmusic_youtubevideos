@@ -10,7 +10,6 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from pytube import Search
 
-
 # File paths to store authentication tokens and config
 CONFIG_FILE = os.path.expanduser("~/.plex_youtube_sync_config.json")
 YOUTUBE_CREDENTIALS_FILE = 'youtube_credentials.json'
@@ -94,25 +93,9 @@ def fetch_plex_playlists(plex_url, plex_token):
     return playlists
 
 
-def search_pytube(query, max_results=5):
+def search_youtube_videos(query):
     search = Search(query)
-    results = search.results[:max_results]
-    video_data = []
-
-    for video in results:
-        video_data.append({
-            'title': video.title,
-            'url': video.watch_url,
-            'video_id': video.video_id
-        })
-
-    return video_data[0]['video_id']
-
-
-def search_youtube_videos(youtube_service, query):
-    request = youtube_service.search().list(q=query, part='snippet', type='video', maxResults=1)
-    response = request.execute()
-    return response['items'][0]['id']['videoId'] if response['items'] else None
+    return search.results
 
 
 def get_existing_video_id(track_id):
@@ -161,6 +144,33 @@ def add_video_to_youtube_playlist(youtube_service, playlist_id, video_id):
     request.execute()
 
 
+def sync_local_to_youtube(youtube_service):
+    playlists = session.query(YouTubePlaylist).all()
+    for yt_playlist in playlists:
+        # Fetch existing items in the YouTube playlist
+        existing_items = session.query(YouTubePlaylistItem).filter_by(youtube_playlist_id=yt_playlist.id).all()
+        existing_video_ids = {item.video_id for item in existing_items}
+
+        # Fetch corresponding Plex playlist items
+        plex_items = session.query(PlexPlaylistItem).filter_by(playlist_id=yt_playlist.plex_playlist_id).all()
+        plex_video_ids = {item.video_id for item in plex_items}
+
+        # Add new items to YouTube playlist
+        for item in plex_items:
+            if item.video_id not in existing_video_ids:
+                add_video_to_youtube_playlist(youtube_service, yt_playlist.playlist_id, item.video_id)
+                session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist.id, video_id=item.video_id))
+                session.commit()
+
+        # Remove items from YouTube playlist that are no longer in the Plex playlist
+        for item in existing_items:
+            if item.video_id not in plex_video_ids:
+                request = youtube_service.playlistItems().delete(id=item.video_id)
+                request.execute()
+                session.delete(item)
+                session.commit()
+
+
 @click.group()
 def cli():
     pass
@@ -192,58 +202,64 @@ def sync():
         click.echo("No configuration found. Please run 'configure' command first.")
         return
 
-    youtube_service = build('youtube', 'v3', credentials=authenticate_youtube())
     plex_url = config["plex_url"]
     plex_token = config["plex_token"]
-    playlist_titles = config["playlists"]
+    playlist_ids = config["playlists"]
 
     playlists = fetch_plex_playlists(plex_url, plex_token)
     for playlist in playlists:
-        if playlist.title not in playlist_titles:
+        if playlist.title not in playlist_ids:
             continue
 
         click.echo(f"Playlist: {playlist.title}")
-
-        # Check if this Plex playlist already has a corresponding YouTube playlist
-        youtube_playlist = session.query(YouTubePlaylist).filter_by(plex_playlist_id=playlist.guid).first()
-        if youtube_playlist:
-            youtube_playlist_id = youtube_playlist.playlist_id
-        else:
-            youtube_playlist_id = create_youtube_playlist(youtube_service, playlist.title)
-            session.add(YouTubePlaylist(plex_playlist_id=playlist.guid, playlist_id=youtube_playlist_id,
-                                        playlist_title=playlist.title))
-            session.commit()
 
         for track in playlist.items():
             existing_video_id = get_existing_video_id(track.ratingKey)
             if existing_video_id:
                 click.echo(
                     f"Track: {track.title}, YouTube Video: https://www.youtube.com/watch?v={existing_video_id} (cached)")
-                add_video_to_youtube_playlist(youtube_service, youtube_playlist_id, existing_video_id)
                 continue
 
-            query = f"{track.title} {track.originalTitle} -lyrical -lyric -audio"
-            video_id = search_pytube(query)
-            if video_id:
-                click.echo(f"Track: {track.title}, YouTube Video: https://www.youtube.com/watch?v={video_id}")
-                save_video_id(playlist.guid, track.ratingKey, track.title, video_id)
-                add_video_to_youtube_playlist(youtube_service, youtube_playlist_id, video_id)
-                # Avoid adding duplicate video entries in YouTube playlist
-                if not session.query(YouTubePlaylistItem).filter_by(video_id=video_id).first():
-                    session.add(YouTubePlaylistItem(youtube_playlist_id=youtube_playlist_id, video_id=video_id))
-                    session.commit()
+            query = f"{track.artist().title} - {track.title}"
+            results = search_youtube_videos(query)
+            if results:
+                click.echo(f"Track: {track.title}, Found YouTube videos:")
+                for i, video in enumerate(results):
+                    click.echo(f"{i + 1}. {video.title} (https://www.youtube.com/watch?v={video.video_id})")
+
+                selected_index = click.prompt("Select a match (0 to skip)", type=int, default=1)
+                if selected_index > 0 and selected_index <= len(results):
+                    selected_video_id = results[selected_index - 1].video_id
+                    save_video_id(playlist.guid, track.ratingKey, track.title, selected_video_id)
+                    click.echo(
+                        f"Track: {track.title}, YouTube Video: https://www.youtube.com/watch?v={selected_video_id} (saved)")
+                else:
+                    click.echo(f"No match selected for track: {track.title}")
             else:
                 click.echo(f"No video found for track: {track.title}")
+
+
+@cli.command()
+def sync_youtube():
+    """Sync the local playlist state to YouTube."""
+    config = load_config()
+    if not config:
+        click.echo("No configuration found. Please run 'configure' command first.")
+        return
+
+    youtube_service = build('youtube', 'v3', credentials=authenticate_youtube())
+    sync_local_to_youtube(youtube_service)
+    click.echo("YouTube playlists have been synced with the local state.")
 
 
 @cli.command()
 @click.argument('query')
 def search_youtube(query):
     """Search YouTube videos matching a title."""
-    youtube_service = build('youtube', 'v3', credentials=authenticate_youtube())
-    video_id = search_pytube(query)
-    if video_id:
-        click.echo(f"Video ID: {video_id}")
+    results = search_youtube_videos(query)
+    if results:
+        for i, video in enumerate(results):
+            click.echo(f"{i + 1}. {video.title} (https://www.youtube.com/watch?v={video.video_id})")
     else:
         click.echo("No video found.")
 
@@ -277,6 +293,15 @@ def list_youtube_items(youtube_playlist_id):
 
     for item in items:
         click.echo(f"Video ID: {item.video_id}")
+
+
+@cli.command()
+def list_playlists():
+    """List all playlists, showing both Plex playlist name and YouTube playlist ID."""
+    playlists = session.query(YouTubePlaylist).all()
+    for playlist in playlists:
+        plex_playlist = session.query(PlexPlaylist).filter_by(id=playlist.plex_playlist_id).first()
+        click.echo(f"Plex Playlist: {plex_playlist.playlist_title}, YouTube Playlist ID: {playlist.playlist_id}")
 
 
 if __name__ == "__main__":
