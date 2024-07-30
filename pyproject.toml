@@ -16,6 +16,7 @@ google-api-python-client = "^2.137.0"
 click = "^8.1.7"
 sqlalchemy = "^2.0.31"
 pytube = "^15.0.0"
+alembic = "^1.13.2"
 
 
 [build-system]
