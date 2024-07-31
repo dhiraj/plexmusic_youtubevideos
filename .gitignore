@@ -1,1 +1,3 @@
 youtube_credentials.json
+*.pyc
+youtube_token.json

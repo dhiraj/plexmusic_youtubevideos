@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boole
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from pytube import Search
+from google.auth.transport.requests import Request
 
 # File paths to store authentication tokens and config
 CONFIG_FILE = os.path.expanduser("~/.plex_youtube_sync_config.json")
@@ -26,6 +27,7 @@ Base = declarative_base()
 class PlexPlaylist(Base):
     __tablename__ = 'plex_playlists'
     id = Column(Integer, primary_key=True)
+    playlist_id = Column(String, unique=True)
     title = Column(String, unique=True)
 
 
@@ -80,11 +82,11 @@ def authenticate_youtube():
     if os.path.exists(YOUTUBE_TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(YOUTUBE_TOKEN_FILE, SCOPES)
     if not creds or not creds.valid:
-        # if creds and creds.expired and creds.refresh_token:
-        #     creds.refresh(Request())
-        # else:
-        flow = InstalledAppFlow.from_client_secrets_file(YOUTUBE_CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=0)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(YOUTUBE_CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
         with open(YOUTUBE_TOKEN_FILE, 'w') as token:
             token.write(creds.to_json())
     return creds
@@ -106,14 +108,15 @@ def get_existing_video_id(track_id):
 
 
 def save_video_id(plex_playlist_id, track_id, track_title, artist_name, album_name, video_id):
-    session.add(PlexPlaylistItem(
+    plex_item = PlexPlaylistItem(
         playlist_id=plex_playlist_id,
         track_id=track_id,
         track_title=track_title,
         artist_name=artist_name,
         album_name=album_name,
         video_id=video_id
-    ))
+    )
+    session.add(plex_item)
     session.commit()
 
 
@@ -165,6 +168,7 @@ def add_video_to_youtube_playlist(youtube_service, playlist_id, video_id):
 
 
 def sync_local_to_youtube(youtube_service):
+    """Sync local playlist state to YouTube."""
     playlists = session.query(YouTubePlaylist).all()
     for yt_playlist in playlists:
         # Fetch existing items in the YouTube playlist
@@ -176,19 +180,21 @@ def sync_local_to_youtube(youtube_service):
         plex_video_ids = {item.video_id for item in plex_items if item.video_id}
 
         # Add new items to YouTube playlist
-        for item in plex_items:
-            if item.video_id and item.video_id not in existing_video_ids:
-                add_video_to_youtube_playlist(youtube_service, yt_playlist.playlist_id, item.video_id)
-                session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist.id, video_id=item.video_id))
-                session.commit()
+        with click.progressbar(plex_items) as items:
+            for item in items:
+                if item.video_id and item.video_id not in existing_video_ids:
+                    add_video_to_youtube_playlist(youtube_service, yt_playlist.playlist_id, item.video_id)
+                    session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist.id, video_id=item.video_id))
+                    session.commit()
 
         # Remove items from YouTube playlist that are no longer in the Plex playlist
-        for item in existing_items:
-            if item.video_id not in plex_video_ids:
-                request = youtube_service.playlistItems().delete(id=item.video_id)
-                request.execute()
-                session.delete(item)
-                session.commit()
+        with click.progressbar(existing_items) as items_remove:
+            for item in items_remove:
+                if item.video_id not in plex_video_ids:
+                    request = youtube_service.playlistItems().delete(id=item.video_id)
+                    request.execute()
+                    session.delete(item)
+                    session.commit()
 
 
 @click.group()
@@ -225,6 +231,8 @@ def sync():
     plex_url = config["plex_url"]
     plex_token = config["plex_token"]
     playlist_titles = config["playlists"]
+    creds = authenticate_youtube()
+    youtube_service = build("youtube", "v3", credentials=creds)
 
     playlists = fetch_plex_playlists(plex_url, plex_token)
     playlist_map = {playlist.title: playlist for playlist in playlists}
@@ -239,9 +247,18 @@ def sync():
         # Save playlist to database if not already saved
         db_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
         if not db_playlist:
-            db_playlist = PlexPlaylist(title=title)
+            db_playlist = PlexPlaylist(title=title, playlist_id=playlist.guid)
             session.add(db_playlist)
             session.commit()
+            click.echo(f"Created Plex Playlist: {playlist.title}, guid: {db_playlist.playlist_id}")
+
+        youtube_playlist = session.query(YouTubePlaylist).filter_by(plex_playlist_id=db_playlist.playlist_id).first()
+        if not youtube_playlist:
+            youtube_playlist_id = create_youtube_playlist(youtube_service, title)
+            youtube_playlist = YouTubePlaylist(playlist_id=youtube_playlist_id, plex_playlist_id=db_playlist.playlist_id, playlist_title=playlist.title)
+            session.add(youtube_playlist)
+            session.commit()
+            click.echo(f"Created Youtube Playlist: {playlist.title}, id: {youtube_playlist_id}")
 
         click.echo(f"Playlist: {playlist.title}")
 
