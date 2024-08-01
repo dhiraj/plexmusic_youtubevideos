@@ -35,8 +35,14 @@ class PlexPlaylistItem(Base):
     __tablename__ = 'plex_playlist_items'
     id = Column(Integer, primary_key=True)
     playlist_id = Column(Integer, ForeignKey('plex_playlists.id'))
+    track_id = Column(String, ForeignKey('plex_tracks.track_id'))
+
+
+class PlexTrack(Base):
+    __tablename__ = 'plex_tracks'
+    id = Column(Integer, primary_key=True)
     track_id = Column(String)
-    track_title = Column(String)
+    title = Column(String)
     artist_name = Column(String)
     album_name = Column(String)
     video_id = Column(String, nullable=True)
@@ -107,7 +113,7 @@ def get_existing_video_id(track_id):
     return record.video_id if record else None
 
 
-def save_video_id(plex_playlist_id, track_id, track_title, artist_name, album_name, video_id):
+def save_playlistitem(plex_playlist_id, track_id, track_title, artist_name, album_name, video_id):
     plex_item = PlexPlaylistItem(
         playlist_id=plex_playlist_id,
         track_id=track_id,
@@ -120,11 +126,22 @@ def save_video_id(plex_playlist_id, track_id, track_title, artist_name, album_na
     session.commit()
 
 
-def mark_no_match(plex_playlist_id, track_id, track_title, artist_name, album_name):
-    session.add(PlexPlaylistItem(
-        playlist_id=plex_playlist_id,
+def save_track(track_id, track_title, artist_name, album_name, video_id):
+    plex_item = PlexTrack(
         track_id=track_id,
-        track_title=track_title,
+        title=track_title,
+        artist_name=artist_name,
+        album_name=album_name,
+        video_id=video_id
+    )
+    session.add(plex_item)
+    session.commit()
+
+
+def mark_no_match(track_id, track_title, artist_name, album_name):
+    session.add(PlexTrack(
+        track_id=track_id,
+        title=track_title,
         artist_name=artist_name,
         album_name=album_name,
         no_match=True
@@ -219,10 +236,9 @@ def configure(plex_url, plex_token, youtube_client_secrets, playlists):
     save_config(config)
     click.echo("Configuration saved successfully.")
 
-
 @cli.command()
-def sync():
-    """Sync specified Plex playlists with YouTube music videos."""
+def match():
+    """Match specified Plex playlists with YouTube music videos and save the matches."""
     config = load_config()
     if not config:
         click.echo("No configuration found. Please run 'configure' command first.")
@@ -244,87 +260,43 @@ def sync():
 
         playlist = playlist_map[title]
 
-        # Save playlist to database if not already saved
-        db_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
-        if not db_playlist:
-            db_playlist = PlexPlaylist(title=title, playlist_id=playlist.guid)
-            session.add(db_playlist)
-            session.commit()
-            click.echo(f"Created Plex Playlist: {playlist.title}, guid: {db_playlist.playlist_id}")
-
-        youtube_playlist = session.query(YouTubePlaylist).filter_by(plex_playlist_id=db_playlist.playlist_id).first()
-        if not youtube_playlist:
-            youtube_playlist_id = create_youtube_playlist(youtube_service, title)
-            youtube_playlist = YouTubePlaylist(playlist_id=youtube_playlist_id, plex_playlist_id=db_playlist.playlist_id, playlist_title=playlist.title)
-            session.add(youtube_playlist)
-            session.commit()
-            click.echo(f"Created Youtube Playlist: {playlist.title}, id: {youtube_playlist_id}")
-
         click.echo(f"Playlist: {playlist.title}")
+        existing_track_ids = session.scalars(session.query(PlexTrack.track_id)).all()
 
         for track in playlist.items():
             if track.type != 'track':
                 continue
+            if track.ratingKey in existing_track_ids:
+                continue
 
-            # Save track to database if not already saved
-            db_track = session.query(PlexPlaylistItem).filter_by(track_id=track.ratingKey).first()
-            if not db_track:
-                db_track = PlexPlaylistItem(
-                    playlist_id=db_playlist.id,
-                    track_id=track.ratingKey,
-                    track_title=track.title,
-                    artist_name=track.originalTitle,
-                    album_name=track.parentTitle
-                )
-                session.add(db_track)
-                session.commit()
-
-    click.echo("All Plex music inserted into the database.")
-
-    for db_playlist in session.query(PlexPlaylist).filter(PlexPlaylist.title.in_(playlist_titles)).all():
-        for db_track in session.query(PlexPlaylistItem).filter_by(playlist_id=db_playlist.id, video_id=None,
-                                                                  no_match=False).all():
-            click.echo(f"Track: {db_track.track_title}, Artist: {db_track.artist_name}, Album: {db_track.album_name}")
+            click.echo(
+                f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
 
             # Default search with artist and song title
-            query_options = [
-                f"{db_track.artist_name} - {db_track.track_title}",
-                f"{db_track.track_title} - {db_track.album_name}",
-                f"{db_track.artist_name} - {db_track.track_title} - {db_track.album_name}"
-            ]
+            query = f"{track.artist().title} - {track.title} - {track.album().title}"
 
-            for i, option in enumerate(query_options, start=1):
-                click.echo(f"{i}. Search with: {option}")
-            click.echo("4. Enter custom YouTube video ID")
-            click.echo("5. Mark as no match")
-            search_option = click.prompt("Select search option", type=int, default=5)
+            results = search_youtube_videos(query)
+            if results:
+                click.echo("1. Enter custom YouTube video ID")
+                click.echo("2. Mark as no match")
+                for i, video in enumerate(results):
+                    click.echo(f"{i + 1 + 2}. {video.title} (https://www.youtube.com/watch?v={video.video_id})")
 
-            if search_option in [1, 2, 3]:
-                query = query_options[search_option - 1]
-                results = search_youtube_videos(query)
-                if results:
-                    click.echo(f"Track: {db_track.track_title}, Found YouTube videos:")
-                    for i, video in enumerate(results):
-                        click.echo(f"{i + 1}. {video.title} (https://www.youtube.com/watch?v={video.video_id})")
+                selected_index = click.prompt("Select a match (0 to skip)", type=int, default=3)
+                if 2 < selected_index <= len(results):
+                    selected_video = results[selected_index - 1 - 2]
+                    save_track(track.ratingKey, track.title, track.artist().title,track.album().title, selected_video.video_id)
+                    click.echo(f"Selected: {selected_video.title}")
+                    continue
 
-                    selected_index = click.prompt("Select a match (0 to skip)", type=int, default=0)
-                    if selected_index > 0 and selected_index <= len(results):
-                        selected_video = results[selected_index - 1]
-                        save_video_id(db_playlist.id, db_track.track_id, db_track.track_title, db_track.artist_name,
-                                      db_track.album_name, selected_video.video_id)
-                        click.echo(f"Selected: {selected_video.title}")
-                        continue
+                elif selected_index == 1:
+                    custom_video_id = click.prompt("Enter YouTube video ID")
+                    save_track(track.ratingKey, track.title, track.artist().title,track.album().title, custom_video_id)
+                    click.echo(f"Custom video ID saved: {custom_video_id}")
 
-            elif search_option == 4:
-                custom_video_id = click.prompt("Enter YouTube video ID")
-                save_video_id(db_playlist.id, db_track.track_id, db_track.track_title, db_track.artist_name,
-                              db_track.album_name, custom_video_id)
-                click.echo(f"Custom video ID saved: {custom_video_id}")
-
-            elif search_option == 5:
-                mark_no_match(db_playlist.id, db_track.track_id, db_track.track_title, db_track.artist_name,
-                              db_track.album_name)
-                click.echo("Track marked as no match.")
+                elif selected_index == 2:
+                    mark_no_match(track.ratingKey, track.title, track.artist().title,track.album().title)
+                    click.echo("Track marked as no match.")
 
     click.echo("All YouTube video matches updated in the database.")
 
