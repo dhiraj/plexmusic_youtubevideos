@@ -17,6 +17,7 @@ click = "^8.1.7"
 sqlalchemy = "^2.0.31"
 pytube = "^15.0.0"
 alembic = "^1.13.2"
+ytmusicapi = "^1.8.0"
 
 
 [build-system]
