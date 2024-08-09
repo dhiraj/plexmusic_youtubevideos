@@ -2,6 +2,7 @@ import os
 import json
 from dataclasses import dataclass
 from typing import List
+from urllib.parse import quote
 
 import click
 from plexapi.server import PlexServer
@@ -104,12 +105,16 @@ def get_existing_video_id(track_id):
 
 
 def save_playlistitem(plex_playlist_id, track_id):
-    plex_item = PlexPlaylistItem(
-        playlist_id=plex_playlist_id,
-        track_id=track_id,
-    )
-    session.add(plex_item)
-    session.commit()
+    record = session.query(PlexPlaylistItem).filter(PlexPlaylistItem.track_id == track_id, PlexPlaylistItem.playlist_id == plex_playlist_id).first()
+    if not record:
+        plex_item = PlexPlaylistItem(
+            playlist_id=plex_playlist_id,
+            track_id=track_id,
+        )
+        session.add(plex_item)
+        session.commit()
+        return True
+    return False
 
 
 def save_track(track_id, track_title, artist_name, album_name, video_id):
@@ -147,33 +152,62 @@ def add_video_to_youtube_playlist(youtube_service, playlist_id, video_id):
 
 def sync_local_to_youtube(youtube_service):
     """Sync local playlist state to YouTube."""
-    playlists = session.query(YouTubePlaylist).all()
+    config = load_config()
+    if not config:
+        click.echo("No configuration found. Please run 'configure' command first.")
+        return
 
-    for yt_playlist in playlists:
-        # Clear out existing items in the YouTube playlist
-        response = youtube_service.get_playlist(
-            playlistId=yt_playlist.playlist_id,
-            limit=None,
-        )
-        videos_to_remove = [{'videoId':item['videoId'],'setVideoId':item['setVideoId']} for item in response['tracks']]
-        if len(videos_to_remove) > 0:
-            response = youtube_service.remove_playlist_items(playlistId=yt_playlist.playlist_id,videos=videos_to_remove)
-            click.echo(f"{response}")
+    youtube_service = authenticate_youtube()
+    playlist_titles = config["playlists"]
 
+    for title in playlist_titles:
+        plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
+        if not plex_playlist:
+            click.echo(f"Could not find plex playlist with title: {title}")
+            continue
+        yt_playlist = session.query(YouTubePlaylist).filter_by(playlist_title=title).first()
+        yt_playlist_id = -1
+
+        if not yt_playlist:
+            # Create new YouTube playlist
+            yt_playlist_id = create_youtube_playlist(youtube_service, title)
+            new_yt_playlist = YouTubePlaylist(
+                plex_playlist_id=plex_playlist.id,
+                playlist_id=yt_playlist_id,
+                playlist_title=title
+            )
+            session.add(new_yt_playlist)
+            session.commit()
+            click.echo(f"Created YouTube playlist for '{title}': {yt_playlist_id}")
+        else:
+            yt_playlist_id = yt_playlist.playlist_id
+            #Clear out existing items in the YouTube playlist
+            response = youtube_service.get_playlist(
+                playlistId=yt_playlist.playlist_id,
+                limit=None,
+            )
+            videos_to_remove = [{'videoId':item['videoId'],'setVideoId':item['setVideoId']} for item in response['tracks']]
+            if len(videos_to_remove) > 0:
+                response = youtube_service.remove_playlist_items(playlistId=yt_playlist.playlist_id,videos=videos_to_remove)
+                click.echo(f"{response}")
+            else:
+                click.echo(f"Playlist {yt_playlist.playlist_id} exists but is EMPTY!?")
 
 
         # Fetch corresponding Plex playlist items from the local database
-        plex_playlist = session.query(YouTubePlaylist, PlexPlaylist).filter(
-            YouTubePlaylist.playlist_id == yt_playlist.playlist_id).all()[0][1]
-        plex_items = session.query(PlexPlaylistItem,PlexTrack).filter(
-            PlexPlaylistItem.playlist_id == plex_playlist.id).filter(PlexTrack.track_id== PlexPlaylistItem.track_id).all()
-        add_ids = [item[1].video_id for item in plex_items]
-        youtube_service.add_playlist_items(playlistId=yt_playlist.playlist_id, videoIds=add_ids)
+        plex_items = session.query(PlexTrack)\
+            .filter(PlexTrack.video_id != None, PlexPlaylistItem.playlist_id == plex_playlist.id)\
+            .join(PlexPlaylistItem,PlexTrack.track_id == PlexPlaylistItem.track_id)\
+            .all()
+        add_ids = [item.video_id for item in plex_items]
+        if len(add_ids) > 0:
+            response = youtube_service.add_playlist_items(playlistId=yt_playlist_id, videoIds=add_ids)
+            click.echo(f"Added {len(add_ids)} to {plex_playlist.title}")
 
-        # # Re-add all items to the YouTube playlist
+        # Re-add all items to the YouTube playlist
         # with click.progressbar(plex_items) as items:
         #     for item in items:
-        #         session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist.id, video_id=item[1].video_id))
+        #         session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist_id, video_id=item.video_id))
         #     session.commit()
 
     click.echo("All YouTube playlists have been synchronized.")
@@ -238,14 +272,13 @@ def match():
                 continue
 
             if track.ratingKey in existing_track_ids:
-                save_playlistitem(plex_playlist.id, track.ratingKey)
+                if save_playlistitem(plex_playlist.id, track.ratingKey):
+                    click.echo(f"Saved pre-matched Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
                 continue
-
-            click.echo(
-                f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
 
             # Default search with artist and song title
             query = f"{track.artist().title} - {track.title} - {track.album().title}"
+            click.echo(f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}, https://www.youtube.com/results?search_query={quote(query)}")
 
             results = search_youtube_videos(query)
             if results:
@@ -304,17 +337,6 @@ def create():
         )
         session.add(new_yt_playlist)
         session.commit()
-
-        # Add videos to YouTube playlist
-        playlist_items = session.query(PlexPlaylistItem).filter_by(playlist_id=plex_playlist.id).all()
-        for item in playlist_items:
-            if item.video_id:
-                add_video_to_youtube_playlist(youtube_service, yt_playlist_id, item.video_id)
-                session.add(YouTubePlaylistItem(
-                    youtube_playlist_id=new_yt_playlist.id,
-                    video_id=item.video_id
-                ))
-                session.commit()
 
 
 @cli.command()
