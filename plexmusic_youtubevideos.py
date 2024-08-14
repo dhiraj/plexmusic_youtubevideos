@@ -158,15 +158,12 @@ def sync_local_to_youtube(youtube_service):
         return
 
     youtube_service = authenticate_youtube()
-    playlist_titles = config["playlists"]
 
-    for title in playlist_titles:
-        plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
-        if not plex_playlist:
-            click.echo(f"Could not find plex playlist with title: {title}")
+    for plex_playlist in session.query(PlexPlaylist).all():
+        title = plex_playlist.title
+        if title == '❤️ Tracks':
             continue
         yt_playlist = session.query(YouTubePlaylist).filter_by(playlist_title=title).first()
-        yt_playlist_id = -1
 
         if not yt_playlist:
             # Create new YouTube playlist
@@ -202,7 +199,17 @@ def sync_local_to_youtube(youtube_service):
         add_ids = [item.video_id for item in plex_items]
         if len(add_ids) > 0:
             response = youtube_service.add_playlist_items(playlistId=yt_playlist_id, videoIds=add_ids)
-            click.echo(f"Added {len(add_ids)} to {plex_playlist.title}")
+            click.echo(f"Added {len(add_ids)} videos to {plex_playlist.title}")
+            # incrementer = 50
+            # start_at = -incrementer
+            # while start_at < len(add_ids):
+            #     start_at += incrementer
+            #     sliced = add_ids[slice(start_at,start_at+incrementer)]
+            #     if len(sliced) > 0:
+            #         response = youtube_service.add_playlist_items(playlistId=yt_playlist_id, videoIds=sliced)
+            #         click.echo(f"Added {len(sliced)} to {plex_playlist.title}")
+            #     else:
+            #         break
 
         # Re-add all items to the YouTube playlist
         # with click.progressbar(plex_items) as items:
@@ -246,23 +253,23 @@ def match():
 
     plex_url = config["plex_url"]
     plex_token = config["plex_token"]
-    playlist_titles = config["playlists"]
+    # playlist_titles = config["playlists"]
     youtube_service = authenticate_youtube()
 
     playlists = fetch_plex_playlists(plex_url, plex_token)
     playlist_map = {playlist.title: playlist for playlist in playlists}
 
-    for title in playlist_titles:
-        if (title not in playlist_map):
-            click.echo(f"Playlist '{title}' not found on Plex server.")
+    for title in playlist_map.keys():
+        if title == '❤️ Tracks':
             continue
-
         playlist = playlist_map[title]
 
         plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
         if not plex_playlist:
-            click.echo(f"Plex Playlist '{title}' not found in local database.")
-            continue
+            plex_playlist = PlexPlaylist(title = title, playlist_id = playlist.guid)
+            session.add(plex_playlist)
+            session.commit()
+            click.echo(f"Plex Playlist '{title}' not found in local database, created.")
 
         click.echo(f"Playlist: {playlist.title}")
         existing_track_ids = session.scalars(session.query(PlexTrack.track_id)).all()
