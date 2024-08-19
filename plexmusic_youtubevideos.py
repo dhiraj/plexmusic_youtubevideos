@@ -244,7 +244,8 @@ def configure(plex_url, plex_token, youtube_client_secrets, playlists):
 
 
 @cli.command()
-def match():
+@click.option('--update-only', is_flag=True, help="Only update existing matches without presenting new matches.")
+def match(update_only):
     """Match specified Plex playlists with YouTube music videos and save the matches."""
     config = load_config()
     if not config:
@@ -253,7 +254,6 @@ def match():
 
     plex_url = config["plex_url"]
     plex_token = config["plex_token"]
-    # playlist_titles = config["playlists"]
     youtube_service = authenticate_youtube()
 
     playlists = fetch_plex_playlists(plex_url, plex_token)
@@ -266,7 +266,7 @@ def match():
 
         plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
         if not plex_playlist:
-            plex_playlist = PlexPlaylist(title = title, playlist_id = playlist.guid)
+            plex_playlist = PlexPlaylist(title=title, playlist_id=playlist.guid)
             session.add(plex_playlist)
             session.commit()
             click.echo(f"Plex Playlist '{title}' not found in local database, created.")
@@ -281,6 +281,10 @@ def match():
             if track.ratingKey in existing_track_ids:
                 if save_playlistitem(plex_playlist.id, track.ratingKey):
                     click.echo(f"Saved pre-matched Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
+                continue
+
+            if update_only:
+                # Skip the tracks without existing matches when update-only is specified
                 continue
 
             # Default search with artist and song title
