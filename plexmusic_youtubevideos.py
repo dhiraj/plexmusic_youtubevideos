@@ -105,7 +105,8 @@ def get_existing_video_id(track_id):
 
 
 def save_playlistitem(plex_playlist_id, track_id):
-    record = session.query(PlexPlaylistItem).filter(PlexPlaylistItem.track_id == track_id, PlexPlaylistItem.playlist_id == plex_playlist_id).first()
+    record = session.query(PlexPlaylistItem).filter(PlexPlaylistItem.track_id == track_id,
+                                                    PlexPlaylistItem.playlist_id == plex_playlist_id).first()
     if not record:
         plex_item = PlexPlaylistItem(
             playlist_id=plex_playlist_id,
@@ -161,7 +162,7 @@ def sync_local_to_youtube(youtube_service):
 
     for plex_playlist in session.query(PlexPlaylist).all():
         title = plex_playlist.title
-        if title == '❤️ Tracks':
+        if not playlist_allowed(title):
             continue
         yt_playlist = session.query(YouTubePlaylist).filter_by(playlist_title=title).first()
 
@@ -178,23 +179,24 @@ def sync_local_to_youtube(youtube_service):
             click.echo(f"Created YouTube playlist for '{title}': {yt_playlist_id}")
         else:
             yt_playlist_id = yt_playlist.playlist_id
-            #Clear out existing items in the YouTube playlist
+            # Clear out existing items in the YouTube playlist
             response = youtube_service.get_playlist(
                 playlistId=yt_playlist.playlist_id,
                 limit=None,
             )
-            videos_to_remove = [{'videoId':item['videoId'],'setVideoId':item['setVideoId']} for item in response['tracks']]
+            videos_to_remove = [{'videoId': item['videoId'], 'setVideoId': item['setVideoId']} for item in
+                                response['tracks']]
             if len(videos_to_remove) > 0:
-                response = youtube_service.remove_playlist_items(playlistId=yt_playlist.playlist_id,videos=videos_to_remove)
+                response = youtube_service.remove_playlist_items(playlistId=yt_playlist.playlist_id,
+                                                                 videos=videos_to_remove)
                 click.echo(f"{response}")
             else:
                 click.echo(f"Playlist {yt_playlist.playlist_id} exists but is EMPTY!?")
 
-
         # Fetch corresponding Plex playlist items from the local database
-        plex_items = session.query(PlexTrack)\
-            .filter(PlexTrack.video_id != None, PlexPlaylistItem.playlist_id == plex_playlist.id)\
-            .join(PlexPlaylistItem,PlexTrack.track_id == PlexPlaylistItem.track_id)\
+        plex_items = session.query(PlexTrack) \
+            .filter(PlexTrack.video_id != None, PlexPlaylistItem.playlist_id == plex_playlist.id) \
+            .join(PlexPlaylistItem, PlexTrack.track_id == PlexPlaylistItem.track_id) \
             .all()
         add_ids = [item.video_id for item in plex_items]
         if len(add_ids) > 0:
@@ -243,6 +245,13 @@ def configure(plex_url, plex_token, youtube_client_secrets, playlists):
     click.echo("Configuration saved successfully.")
 
 
+def playlist_allowed(title: str) -> bool:
+    if '❤' in title or '❤️' in title or 'untagged' in title.lower() or 'recently' in title.lower() or title.startswith(
+            "All "):
+        return False
+    return True
+
+
 @cli.command()
 @click.option('--update-only', is_flag=True, help="Only update existing matches without presenting new matches.")
 def match(update_only):
@@ -260,7 +269,7 @@ def match(update_only):
     playlist_map = {playlist.title: playlist for playlist in playlists}
 
     for title in playlist_map.keys():
-        if title == '❤️ Tracks':
+        if not playlist_allowed(title):
             continue
         playlist = playlist_map[title]
 
@@ -280,7 +289,8 @@ def match(update_only):
 
             if track.ratingKey in existing_track_ids:
                 if save_playlistitem(plex_playlist.id, track.ratingKey):
-                    click.echo(f"Saved pre-matched Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
+                    click.echo(
+                        f"Saved pre-matched Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
                 continue
 
             if update_only:
@@ -289,7 +299,8 @@ def match(update_only):
 
             # Default search with artist and song title
             query = f"{track.artist().title} - {track.title} - {track.album().title}"
-            click.echo(f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}, https://www.youtube.com/results?search_query={quote(query)}")
+            click.echo(
+                f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}, https://www.youtube.com/results?search_query={quote(query)}")
 
             results = search_youtube_videos(query)
             if results:
