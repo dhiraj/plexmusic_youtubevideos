@@ -132,17 +132,6 @@ def save_track(track_id, track_title, artist_name, album_name, video_id):
     session.commit()
 
 
-def mark_no_match(track_id, track_title, artist_name, album_name):
-    session.add(PlexTrack(
-        track_id=track_id,
-        title=track_title,
-        artist_name=artist_name,
-        album_name=album_name,
-        no_match=True
-    ))
-    session.commit()
-
-
 def create_youtube_playlist(youtube_service, title):
     response = youtube_service.create_playlist(title=title,
                                                description=f"A playlist created based on the Plex playlist: {title}")
@@ -221,29 +210,122 @@ def cli():
     pass
 
 
+def prompt_video_selection(track, results):
+    """Prompt the user to select a video from the search results or enter a custom video ID."""
+    click.echo("1. Enter custom YouTube video ID")
+    click.echo("2. Mark as no match")
+    for i, result in enumerate(results, 3):
+        click.echo(f"{i}. {result.title} (https://www.youtube.com/watch?v={result.video_id})")
+
+    while True:
+        choice = click.prompt("Select an option", type=int, default=3)
+        if choice == 1:
+            video_id = click.prompt("Enter the YouTube video ID", type=str)
+            update_track_with_video(track, video_id)
+            break
+        elif choice == 2:
+            mark_track_no_match(track)
+            break
+        elif 3 <= choice < 3 + len(results):
+            selected = results[choice - 3]
+            update_track_with_video(track, selected.video_id)
+            break
+        else:
+            click.echo("Invalid option selected.")
+
+
+def update_track_with_video(track, video_id):
+    """Update the track with the selected video ID and save it to the database."""
+    track.video_id = video_id
+    track.no_match = False  # Clear any previous no_match flag
+    session.commit()
+    click.echo(f"Updated Track ID: {track.track_id} with new Video ID: {video_id}")
+
+
+def mark_track_no_match(track):
+    """Mark the track as having no match and save it to the database."""
+    track.no_match = True
+    session.commit()
+    click.echo(f"Marked Track ID: {track.track_id} as no match")
+
+
+def mark_no_match(track_id, track_title, artist_name, album_name):
+    session.add(PlexTrack(
+        track_id=track_id,
+        title=track_title,
+        artist_name=artist_name,
+        album_name=album_name,
+        no_match=True
+    ))
+    session.commit()
+
+
 @cli.command()
-@click.option('--plex-url', prompt='Plex Server URL', help='URL of the Plex server')
-@click.option('--plex-token', prompt='Plex Token', hide_input=True, help='Plex token for authentication')
-@click.option('--youtube-client-secrets', prompt='YouTube Client Secrets File', type=click.Path(exists=True),
-              help='Path to the YouTube client secrets JSON file')
-@click.option('--playlists', prompt='Plex Playlist Titles', help='Comma-separated list of Plex Playlist titles to sync')
-def configure(plex_url, plex_token, youtube_client_secrets, playlists):
-    """Configure the Plex and YouTube API keys, and specify playlists to sync."""
-    config = {
-        "plex_url": plex_url,
-        "plex_token": plex_token,
-        "youtube_client_secrets": youtube_client_secrets,
-        "playlists": playlists.split(',')
-    }
-    save_config(config)
-    click.echo("Configuration saved successfully.")
+@click.option('--track-id', default=None, help='The Plex track ID to re-match.')
+@click.option('--video-id', default=None, help='The YouTube video ID to match with a Plex track.')
+def re_match(track_id, video_id):
+    """Re-match an existing Plex track to a different YouTube video, using either track ID or video ID."""
+    if track_id:
+        # Fetch the track from the database using track_id
+        track = session.query(PlexTrack).filter_by(track_id=track_id).first()
+        if not track:
+            click.echo(f"No track found with ID {track_id}.")
+            return
+    elif video_id:
+        # Fetch the track from the database using video_id
+        track = session.query(PlexTrack).filter_by(video_id=video_id).first()
+        if not track:
+            click.echo(f"No track found with video ID {video_id}.")
+            return
+    else:
+        # Prompt user for either track_id or video_id if neither is provided
+        track_id = click.prompt('Please enter the Plex track ID or YouTube video ID', type=str)
+        # Determine if it's a track ID or a video ID based on its length
+        if len(track_id) > 11:
+            track = session.query(PlexTrack).filter_by(track_id=track_id).first()
+        else:
+            track = session.query(PlexTrack).filter_by(video_id=track_id).first()
 
+        if not track:
+            click.echo(f"No track found with the provided identifier: {track_id}.")
+            return
 
-def playlist_allowed(title: str) -> bool:
-    if 'less' in title.lower() or '❤' in title or '❤️' in title or 'untagged' in title.lower() or 'recently' in title.lower() or title.startswith(
-            "All "):
-        return False
-    return True
+    query = f"{track.title} - {track.title} - {track.album_name}"
+    click.echo(
+        f"Re-matching Track: {track.title} by {track.artist_name} (Track ID: {track.track_id}),\ncurrent: https://www.youtube.com/watch?v={track.video_id},\nsearch: https://www.youtube.com/results?search_query={quote(query)}")
+
+    # Prompt for a new YouTube video ID or allow the user to search for one
+    query = f"{track.artist_name} - {track.title} - {track.album_name}"
+    results = search_youtube_videos(query)
+
+    if results:
+        click.echo("1. Enter custom YouTube video ID")
+        click.echo("2. Mark as no match")
+        for i, result in enumerate(results, 3):
+            click.echo(f"{i}. {result.title} (https://www.youtube.com/watch?v={result.video_id})")
+
+        while True:
+            choice = click.prompt("Select an option", type=int, default=3)
+            if choice == 1:
+                new_video_id = click.prompt("Enter the YouTube video ID", type=str)
+                break
+            elif choice == 2:
+                mark_track_no_match(track)
+                return
+            elif 3 <= choice < 3 + len(results):
+                selected = results[choice - 3]
+                new_video_id = selected.video_id
+                break
+    else:
+        click.echo("No matching YouTube videos found.")
+        return
+
+    # Update the track with the new video ID
+    track.video_id = new_video_id
+    track.no_match = False  # Clear the no_match flag if it was set
+    session.commit()
+
+    click.echo(f"Track re-matched successfully to video ID: {new_video_id}")
 
 
 @cli.command()
@@ -288,71 +370,45 @@ def match(update_only):
                 continue
 
             if update_only:
-                # Skip the tracks without existing matches when update-only is specified
                 continue
 
-            # Default search with artist and song title
             query = f"{track.artist().title} - {track.title} - {track.album().title}"
             click.echo(
                 f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}, https://www.youtube.com/results?search_query={quote(query)}")
 
             results = search_youtube_videos(query)
             if results:
-                click.echo("1. Enter custom YouTube video ID")
-                click.echo("2. Mark as no match")
-                for i, result in enumerate(results, 3):
-                    click.echo(f"{i}. {result.title} (https://www.youtube.com/watch?v={result.video_id})")
-
-                while True:
-                    choice = click.prompt("Select an option", type=int, default=3)
-                    if choice == 1:
-                        video_id = click.prompt("Enter the YouTube video ID", type=str)
-                        save_track(track.ratingKey, track.title, track.artist().title, track.album().title, video_id)
-                        save_playlistitem(plex_playlist.id, track.ratingKey)
-                        break
-                    elif choice == 2:
-                        mark_no_match(track.ratingKey, track.title, track.artist().title, track.album().title)
-                        break
-                    elif 3 <= choice < 3 + len(results):
-                        selected = results[choice - 3]
-                        save_track(track.ratingKey, track.title, track.artist().title, track.album().title,
-                                   selected.video_id)
-                        save_playlistitem(plex_playlist.id, track.ratingKey)
-                        break
+                prompt_video_selection(track, results)
+            else:
+                click.echo("No search results found.")
 
 
 @cli.command()
-def create():
-    """Create YouTube playlists and add matched videos."""
+@click.option('--plex-url', prompt='Plex Server URL', help='URL of the Plex server')
+@click.option('--plex-token', prompt='Plex Token', hide_input=True, help='Plex token for authentication')
+@click.option('--youtube-client-secrets', prompt='YouTube Client Secrets File', type=click.Path(exists=True),
+              help='Path to the YouTube client secrets JSON file')
+def configure(plex_url, plex_token, youtube_client_secrets):
+    """Configure the Plex and YouTube API keys, and specify playlists to sync."""
+    config = {
+        "plex_url": plex_url,
+        "plex_token": plex_token,
+        "youtube_client_secrets": youtube_client_secrets,
+    }
+    save_config(config)
+    click.echo("Configuration saved successfully.")
+
+
+def playlist_allowed(title: str) -> bool:
     config = load_config()
-    if not config:
-        click.echo("No configuration found. Please run 'configure' command first.")
-        return
+    disallowed_items = config.get("disallowed_items", [])
 
-    youtube_service = authenticate_youtube()
-    playlist_titles = config["playlists"]
+    # Check if the title contains any of the disallowed items
+    for item in disallowed_items:
+        if item.lower() in title.lower():
+            return False
 
-    for title in playlist_titles:
-        plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
-        if not plex_playlist:
-            click.echo(f"Plex Playlist '{title}' not found in local database.")
-            continue
-
-        # Check if YouTube playlist already exists
-        yt_playlist = session.query(YouTubePlaylist).filter_by(plex_playlist_id=plex_playlist.id).first()
-        if yt_playlist:
-            click.echo(f"YouTube playlist for '{title}' already exists: {yt_playlist.playlist_id}")
-            continue
-
-        # Create new YouTube playlist
-        yt_playlist_id = create_youtube_playlist(youtube_service, title)
-        new_yt_playlist = YouTubePlaylist(
-            plex_playlist_id=plex_playlist.id,
-            playlist_id=yt_playlist_id,
-            playlist_title=title
-        )
-        session.add(new_yt_playlist)
-        session.commit()
+    return True
 
 
 @cli.command()
@@ -387,39 +443,13 @@ def check_tracks():
                 song_info = youtube_service.get_song(track.video_id)
 
                 # Check if the song_info contains any 'playabilityStatus' errors
-                if not song_info or "playabilityStatus" in song_info and song_info["playabilityStatus"].get("status") != "OK":
-                    click.echo(f"Track unavailable: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id})")
+                if not song_info or "playabilityStatus" in song_info and song_info["playabilityStatus"].get(
+                        "status") != "OK":
+                    click.echo(
+                        f"Track unavailable: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id})")
             except Exception as e:
-                click.echo(f"Error checking track: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id}) - {str(e)}")
-
-
-# @cli.command()
-# def check_tracks():
-#     """Check all saved Plex tracks for availability on YouTube."""
-#     tracks = session.query(PlexTrack).all()
-#     youtube_base_url = "https://www.youtube.com/watch?v="
-#
-#     with click.progressbar(tracks, label="Checking track availability on YouTube") as bar:
-#         for track in bar:
-#             if track.no_match or not track.video_id:
-#                 # Skip tracks already marked as no match or without a video ID
-#                 continue
-#
-#             video_url = f"{youtube_base_url}{track.video_id}"
-#             try:
-#                 # Issue a HEAD request to check if the video exists
-#                 response = requests.head(video_url, allow_redirects=True)
-#                 if response.status_code == 404:
-#                     click.echo(
-#                         f"Track not available (404) on YouTube for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
-#                 elif response.status_code >= 400:
-#                     click.echo(
-#                         f"Track returned error ({response.status_code}) for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
-#                 else:
-#                     pass
-#                     #click.echo(f"Track is available on YouTube for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
-#             except requests.RequestException as e:
-#                 click.echo(f"Error checking video availability for Track ID: {track.track_id}, Title: {track.title} - {str(e)}")
+                click.echo(
+                    f"Error checking track: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id}) - {str(e)}")
 
 
 if __name__ == "__main__":
