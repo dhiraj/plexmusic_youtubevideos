@@ -5,12 +5,14 @@ from typing import List
 from urllib.parse import quote
 
 import click
+import requests
 from plexapi.server import PlexServer
 from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boolean
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from pytube import Search
 from ytmusicapi import YTMusic
+from ytmusicapi.exceptions import YTMusicServerError
 
 # File paths to store authentication tokens and config
 CONFIG_FILE = os.path.expanduser("~/.plex_youtube_sync_config.json")
@@ -152,7 +154,7 @@ def add_video_to_youtube_playlist(youtube_service, playlist_id, video_id):
 
 
 def sync_local_to_youtube(youtube_service):
-    """Sync local playlist state to YouTube."""
+    """Sync local playlist state to YouTube, with backup and restore functionality."""
     config = load_config()
     if not config:
         click.echo("No configuration found. Please run 'configure' command first.")
@@ -164,9 +166,29 @@ def sync_local_to_youtube(youtube_service):
         title = plex_playlist.title
         if not playlist_allowed(title):
             continue
+
         yt_playlist = session.query(YouTubePlaylist).filter_by(playlist_title=title).first()
 
-        if not yt_playlist:
+        if yt_playlist:
+            # Rename existing playlist as a backup
+            backup_title = f"{title} - Backup"
+            try:
+                youtube_service.edit_playlist(yt_playlist.playlist_id, title=backup_title)
+            except YTMusicServerError:
+                click.echo(f"Couldn't rename {title}")
+                backup_title = None
+            click.echo(f"Renamed YouTube playlist '{title}' to '{backup_title}'")
+        else:
+            backup_title = None
+
+        # Fetch corresponding Plex playlist items from the local database
+        plex_items = session.query(PlexTrack) \
+            .filter(PlexTrack.video_id != None, PlexPlaylistItem.playlist_id == plex_playlist.id) \
+            .join(PlexPlaylistItem, PlexTrack.track_id == PlexPlaylistItem.track_id) \
+            .all()
+        add_ids = [item.video_id for item in plex_items]
+
+        if len(add_ids) > 0:
             # Create new YouTube playlist
             yt_playlist_id = create_youtube_playlist(youtube_service, title)
             new_yt_playlist = YouTubePlaylist(
@@ -176,48 +198,20 @@ def sync_local_to_youtube(youtube_service):
             )
             session.add(new_yt_playlist)
             session.commit()
-            click.echo(f"Created YouTube playlist for '{title}': {yt_playlist_id}")
-        else:
-            yt_playlist_id = yt_playlist.playlist_id
-            # Clear out existing items in the YouTube playlist
-            response = youtube_service.get_playlist(
-                playlistId=yt_playlist.playlist_id,
-                limit=None,
-            )
-            videos_to_remove = [{'videoId': item['videoId'], 'setVideoId': item['setVideoId']} for item in
-                                response['tracks']]
-            if len(videos_to_remove) > 0:
-                response = youtube_service.remove_playlist_items(playlistId=yt_playlist.playlist_id,
-                                                                 videos=videos_to_remove)
-                click.echo(f"{response}")
-            else:
-                click.echo(f"Playlist {yt_playlist.playlist_id} exists but is EMPTY!?")
 
-        # Fetch corresponding Plex playlist items from the local database
-        plex_items = session.query(PlexTrack) \
-            .filter(PlexTrack.video_id != None, PlexPlaylistItem.playlist_id == plex_playlist.id) \
-            .join(PlexPlaylistItem, PlexTrack.track_id == PlexPlaylistItem.track_id) \
-            .all()
-        add_ids = [item.video_id for item in plex_items]
-        if len(add_ids) > 0:
+            # Add matched videos to the new YouTube playlist
             response = youtube_service.add_playlist_items(playlistId=yt_playlist_id, videoIds=add_ids)
-            click.echo(f"Added {len(add_ids)} videos to {plex_playlist.title}")
-            # incrementer = 50
-            # start_at = -incrementer
-            # while start_at < len(add_ids):
-            #     start_at += incrementer
-            #     sliced = add_ids[slice(start_at,start_at+incrementer)]
-            #     if len(sliced) > 0:
-            #         response = youtube_service.add_playlist_items(playlistId=yt_playlist_id, videoIds=sliced)
-            #         click.echo(f"Added {len(sliced)} to {plex_playlist.title}")
-            #     else:
-            #         break
+            click.echo(f"Added {len(add_ids)} videos to '{title}'")
 
-        # Re-add all items to the YouTube playlist
-        # with click.progressbar(plex_items) as items:
-        #     for item in items:
-        #         session.add(YouTubePlaylistItem(youtube_playlist_id=yt_playlist_id, video_id=item.video_id))
-        #     session.commit()
+            # Delete backup if the operation is successful
+            if backup_title:
+                youtube_service.delete_playlist(yt_playlist.playlist_id)
+                click.echo(f"Deleted backup playlist '{backup_title}'")
+        else:
+            click.echo(f"Skipped creating playlist for '{title}' as there are no matches.")
+            if backup_title:
+                youtube_service.edit_playlist(yt_playlist.playlist_id, title=title)
+                click.echo(f"Restored original playlist '{title}' from backup '{backup_title}'")
 
     click.echo("All YouTube playlists have been synchronized.")
 
@@ -246,7 +240,7 @@ def configure(plex_url, plex_token, youtube_client_secrets, playlists):
 
 
 def playlist_allowed(title: str) -> bool:
-    if '❤' in title or '❤️' in title or 'untagged' in title.lower() or 'recently' in title.lower() or title.startswith(
+    if 'less' in title.lower() or '❤' in title or '❤️' in title or 'untagged' in title.lower() or 'recently' in title.lower() or title.startswith(
             "All "):
         return False
     return True
@@ -366,6 +360,66 @@ def sync():
     """Synchronize the local database state to YouTube playlists."""
     youtube_service = authenticate_youtube()
     sync_local_to_youtube(youtube_service)
+
+
+@cli.command()
+def check_tracks():
+    config = load_config()
+    if not config:
+        click.echo("No configuration found. Please run 'configure' command first.")
+        return
+
+    youtube_service = authenticate_youtube()
+
+    # Query all tracks with video IDs from the database
+    tracks = session.query(PlexTrack).all()
+
+    click.echo(f"Checking {len(tracks)} tracks for availability...")
+
+    # Progress bar to show progress
+    with click.progressbar(tracks, label="Checking tracks") as bar:
+        for track in bar:
+            try:
+                if track.no_match or not track.video_id:
+                    # Skip tracks already marked as no match or without a video ID
+                    continue
+                # Use get_song API to fetch information about the video
+                song_info = youtube_service.get_song(track.video_id)
+
+                # Check if the song_info contains any 'playabilityStatus' errors
+                if not song_info or "playabilityStatus" in song_info and song_info["playabilityStatus"].get("status") != "OK":
+                    click.echo(f"Track unavailable: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id})")
+            except Exception as e:
+                click.echo(f"Error checking track: {track.title} by {track.artist_name} (Track ID: {track.track_id}, Video ID: {track.video_id}) - {str(e)}")
+
+
+# @cli.command()
+# def check_tracks():
+#     """Check all saved Plex tracks for availability on YouTube."""
+#     tracks = session.query(PlexTrack).all()
+#     youtube_base_url = "https://www.youtube.com/watch?v="
+#
+#     with click.progressbar(tracks, label="Checking track availability on YouTube") as bar:
+#         for track in bar:
+#             if track.no_match or not track.video_id:
+#                 # Skip tracks already marked as no match or without a video ID
+#                 continue
+#
+#             video_url = f"{youtube_base_url}{track.video_id}"
+#             try:
+#                 # Issue a HEAD request to check if the video exists
+#                 response = requests.head(video_url, allow_redirects=True)
+#                 if response.status_code == 404:
+#                     click.echo(
+#                         f"Track not available (404) on YouTube for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
+#                 elif response.status_code >= 400:
+#                     click.echo(
+#                         f"Track returned error ({response.status_code}) for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
+#                 else:
+#                     pass
+#                     #click.echo(f"Track is available on YouTube for Track ID: {track.track_id}, Title: {track.title}, Video ID: {track.video_id}")
+#             except requests.RequestException as e:
+#                 click.echo(f"Error checking video availability for Track ID: {track.track_id}, Title: {track.title} - {str(e)}")
 
 
 if __name__ == "__main__":
