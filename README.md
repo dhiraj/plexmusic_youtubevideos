@@ -1,114 +1,120 @@
-# Plex-YouTube Sync
+# Plex YouTube Sync
 
-Plex-YouTube Sync is a command-line tool to synchronize your Plex smart music playlists with YouTube music videos. The tool allows you to watch your favorite music videos on YouTube based on your playlists in Plex.
+**Project Description:**  
+This project synchronizes Plex playlists with YouTube. It allows you to match tracks from Plex with corresponding YouTube videos and create or update YouTube playlists based on your Plex playlists.
 
-## Features
-
-- Authenticate using OAuth2 with both Plex and YouTube.
-- Maintain a list of Plex playlists to sync in a config file.
-- Use a local SQLite database to store already matched playlist items and avoid updating them on repeated runs.
-- Use `pytube` to search for YouTube videos, minimizing YouTube API usage.
-- Prompt the user to select the correct video match.
-- Sync the local playlist state to YouTube, adding new songs and removing those that have been removed.
+## Table of Contents
+- [Installation](#installation)
+- [Environment Setup](#environment-setup)
+- [Usage](#usage)
+  - [Commands](#commands)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Installation
 
 ### Prerequisites
+- **Python Version:** Python 3.8+
+- **Dependencies:** Install the required Python packages with the following command:
 
-- Python 3.7+
-- [Poetry](https://python-poetry.org/docs/#installation)
+  ```bash
+  pip install -r requirements.txt
+  ```
 
-### Steps
+  Create a `requirements.txt` file with the following content:
 
-1. **Clone the Repository**
+  ```
+  click
+  requests
+  plexapi
+  sqlalchemy
+  pytube
+  ytmusicapi
+  ```
 
-   ```sh
+### Environment Setup
+1. **Clone the Repository:**
+
+   ```bash
    git clone https://github.com/yourusername/plex-youtube-sync.git
    cd plex-youtube-sync
    ```
 
-2. ** Install Dependencies
+2. **Database Initialization:**
+   
+   The project uses SQLite for managing data. The database will be automatically initialized when you first run the application.
 
-   ```sh
-   poetry install
+   ```bash
+   python plexmusic_youtubevideos.py configure
    ```
 
-3. Create Configuration Files
+   This command will prompt you to enter your Plex server URL, Plex token, and the path to your YouTube client secrets file.
 
-  * Create youtube_credentials.json from the Google API Console for OAuth2.
-  * Run the configure command to set up Plex and YouTube credentials.
+3. **Configure Authentication:**
 
-## Configuration
-Run the following command to configure Plex and YouTube settings:
-
-   ```sh
-   poetry run python sync.py configure
-   ```
-
-You will be prompted for:
-
-  * Plex Server URL
-  * Plex Token
-  * Path to the YouTube client secrets JSON file
-  * Comma-separated list of Plex Playlist IDs to sync
+   You need to provide a YouTube client secrets file to authenticate with the YouTube API. The path to this file will be specified during the `configure` step.
 
 ## Usage
-### Sync Playlists
-Synchronize specified Plex playlists with YouTube music videos:
 
-```sh
-poetry run python sync.py sync
-```
+### Commands
+The CLI provides several commands to manage and synchronize your playlists.
 
-### Sync YouTube Playlists
-Sync the local playlist state to YouTube, adding new songs and removing those that have been removed:
+- **Configure the Application:**
 
-```sh
-poetry run python sync.py sync_youtube
-```
+  Run the following command to configure your Plex and YouTube API keys:
 
-### Search YouTube Videos
-Search YouTube videos matching a title:
+  ```bash
+  python plexmusic_youtubevideos.py configure
+  ```
 
-```sh
-poetry run python sync.py search_youtube <query>
-```
+- **Match Tracks:**
 
-### List Plex Playlist Items
-List all items in a Plex playlist:
+  This command matches tracks from your Plex playlists with YouTube videos.
 
-```sh
-poetry run python sync.py list_plex_items <playlist_id>
-```
+  ```bash
+  python plexmusic_youtubevideos.py match
+  ```
 
-List YouTube Playlist Items
-List all items in a stored YouTube playlist:
+  **Options:**
+  - `--update-only`: Only update existing matches without presenting new matches.
 
-```sh
-poetry run python sync.py list_youtube_items <youtube_playlist_id>
-```
+- **Re-Match Tracks:**
 
-### List All Playlists
-List all playlists, showing both Plex playlist name and YouTube playlist ID:
+  Use this command to re-match an existing Plex track to a different YouTube video.
 
-```sh
-poetry run python sync.py list_playlists
-```
+  ```bash
+  python plexmusic_youtubevideos.py re_match --track-id <TRACK_ID> --video-id <VIDEO_ID>
+  ```
 
-## Development
-To contribute to this project:
+  **Options:**
+  - `--track-id`: The Plex track ID to re-match.
+  - `--video-id`: The YouTube video ID to match with a Plex track.
 
-  * Fork the repository.
-  * Create a new feature branch.
-  * Make your changes and commit them.
-  * Push to your fork and create a pull request.
+- **Synchronize Playlists:**
+
+  This command synchronizes the local database state to YouTube playlists.
+
+  ```bash
+  python plexmusic_youtubevideos.py sync
+  ```
+
+- **Check Tracks:**
+
+  This command checks the availability of the tracks in the local database on YouTube.
+
+  ```bash
+  python plexmusic_youtubevideos.py check_tracks
+  ```
+
+## Contributing
+1. Fork the repository.
+2. Create a new branch for your feature or bugfix.
+3. Commit your changes with clear messages.
+4. Push to the branch.
+5. Submit a pull request.
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
-## Acknowledgments
-  * Plex API for interacting with Plex.
-  * Google APIs Client Library for Python for interacting with YouTube.
-  * Pytube for YouTube video search.
- 
-Feel free to open an issue if you find a bug or have a suggestion!
+
+> Contributions are welcome, please go ahead and create a pull request to contribute, thanks!
