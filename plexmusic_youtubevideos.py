@@ -7,7 +7,7 @@ from urllib.parse import quote
 import click
 import requests
 from plexapi.server import PlexServer
-from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boolean
+from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boolean, select
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from pytube import Search
@@ -155,6 +155,9 @@ def sync_local_to_youtube(youtube_service):
         title = plex_playlist.title
         if not playlist_allowed(title):
             continue
+        if config["allowed_sync_playlists"] and title not in config["allowed_sync_playlists"]:
+            click.echo(f"Skipped syncing {title} because it is not in allowed_sync_playlists")
+            continue
 
         yt_playlist = session.query(YouTubePlaylist).filter_by(playlist_title=title).first()
 
@@ -210,7 +213,7 @@ def cli():
     pass
 
 
-def prompt_video_selection(track, results):
+def prompt_video_selection(track, results, plex_playlist_id):
     """Prompt the user to select a video from the search results or enter a custom video ID."""
     click.echo("1. Enter custom YouTube video ID")
     click.echo("2. Mark as no match")
@@ -233,11 +236,38 @@ def prompt_video_selection(track, results):
         else:
             click.echo("Invalid option selected.")
 
+    # Save the playlist item (track_id and playlist_id)
+    save_playlistitem(plex_playlist_id, track.track_id)
+
 
 def update_track_with_video(track, video_id):
-    """Update the track with the selected video ID and save it to the database."""
+    """Update the track with the selected video ID, checking if the video ID is already in use."""
+    # Check if the video ID is already used by another track
+    existing_track = session.query(PlexTrack).filter(PlexTrack.video_id == video_id).first()
+
+    if existing_track:
+        click.echo(
+            f"Error: The video ID '{video_id}' is already associated with track '{existing_track.title}' (Track ID: {existing_track.track_id}).")
+
+        # Provide options to the user
+        click.echo("1. Enter a different YouTube video ID")
+        click.echo("2. Mark this track as No match")
+
+        choice = click.prompt("Choose an option", type=int)
+
+        if choice == 1:
+            new_video_id = click.prompt("Enter a new YouTube video ID", type=str)
+            update_track_with_video(track, new_video_id)  # Recursive call with the new video ID
+        elif choice == 2:
+            mark_track_no_match(track)
+        else:
+            click.echo("Invalid choice. Please try again.")
+
+        return
+
+    # If no conflict, proceed to update the track
     track.video_id = video_id
-    track.no_match = False  # Clear any previous no_match flag
+    track.no_match = False  # Clear the no_match flag
     session.commit()
     click.echo(f"Updated Track ID: {track.track_id} with new Video ID: {video_id}")
 
@@ -246,7 +276,7 @@ def mark_track_no_match(track):
     """Mark the track as having no match and save it to the database."""
     track.no_match = True
     session.commit()
-    click.echo(f"Marked Track ID: {track.track_id} as no match")
+    click.echo(f"Marked Track: {track} as no match")
 
 
 def mark_no_match(track_id, track_title, artist_name, album_name):
@@ -349,6 +379,7 @@ def match(update_only):
             continue
         playlist = playlist_map[title]
 
+        # Fetch or create PlexPlaylist in the database
         plex_playlist = session.query(PlexPlaylist).filter_by(title=title).first()
         if not plex_playlist:
             plex_playlist = PlexPlaylist(title=title, playlist_id=playlist.guid)
@@ -357,30 +388,52 @@ def match(update_only):
             click.echo(f"Plex Playlist '{title}' not found in local database, created.")
 
         click.echo(f"Playlist: {playlist.title}")
-        existing_track_ids = session.scalars(session.query(PlexTrack.track_id)).all()
 
-        for track in playlist.items():
-            if track.type != 'track':
+        # Retrieve all existing track IDs from PlexTrack in the database
+        existing_track_ids = session.scalars(select(PlexTrack.track_id)).all()
+
+        for item in playlist.items():
+            if item.type != 'track':
                 continue
 
-            if track.ratingKey in existing_track_ids:
-                if save_playlistitem(plex_playlist.id, track.ratingKey):
+            # Check if the track is already in the database using its ratingKey (track_id)
+            if item.ratingKey in existing_track_ids:
+                click.echo(f"Track '{item.title}' already exists in the database, id: {item.ratingKey}")
+
+                # Fetch the track from the PlexTrack table to work with it
+                track = session.query(PlexTrack).filter_by(track_id=item.ratingKey).first()
+
+                # Optionally, save the track into the PlexPlaylistItems if not already saved
+                if save_playlistitem(plex_playlist.id, track.track_id):
                     click.echo(
-                        f"Saved pre-matched Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}")
-                continue
+                        f"Saved pre-matched Track: {track.title}, Artist: {track.artist_name}, Album: {track.album_name}, id: {track.track_id}")
 
-            if update_only:
-                continue
-
-            query = f"{track.artist().title} - {track.title} - {track.album().title}"
-            click.echo(
-                f"Track: {track.title}, Artist: {track.artist().title}, Album: {track.album().title}, id: {track.ratingKey}, https://www.youtube.com/results?search_query={quote(query)}")
-
-            results = search_youtube_videos(query)
-            if results:
-                prompt_video_selection(track, results)
+                # If update_only is enabled, skip already matched tracks
+                if update_only and track.video_id:
+                    continue
             else:
-                click.echo("No search results found.")
+                # If track is not found in the database, create a new PlexTrack record
+                track = PlexTrack(
+                    track_id=item.ratingKey,
+                    title=item.title,
+                    artist_name=item.artist().title,
+                    album_name=item.album().title
+                )
+                session.add(track)
+                session.commit()
+                click.echo(
+                    f"Added Track: {item.title}, Artist: {item.artist().title}, Album: {item.album().title} to database, id: {item.ratingKey}")
+
+                # Search for YouTube videos based on the track details
+                query = f"{track.artist_name} - {track.title} - {track.album_name}"
+                click.echo(f"Searching YouTube for: {query}")
+                results = search_youtube_videos(query)
+
+                if results:
+                    # Call prompt_video_selection with the track from the PlexTrack table
+                    prompt_video_selection(track, results, plex_playlist.id)
+                else:
+                    click.echo(f"No YouTube results found for '{track.title}'")
 
 
 @cli.command()
